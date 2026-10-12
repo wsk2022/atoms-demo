@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """API 路由。
 
 RESTful 设计：

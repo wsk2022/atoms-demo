@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """LLM 客户端：基于 httpx 的流式调用，支持重试熔断和降级响应。
 
 设计要点：

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """文件式会话存储：一会话一目录，替代数据库。
 
 目录布局：

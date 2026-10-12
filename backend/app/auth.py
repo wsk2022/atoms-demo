@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """用户认证：邮箱校验、密码哈希、登录态 token、FastAPI 依赖。
 
 设计取舍（笔试题范围）：
