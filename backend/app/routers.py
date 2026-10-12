@@ -28,15 +28,111 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from app import config, files, orchestrator, skills, store
 from app.agents import list_agents
+from app.auth import (
+    bearer_scheme,
+    get_current_user,
+    hash_password,
+    is_valid_email,
+    issue_token,
+    resolve_token,
+    revoke_token,
+    verify_password,
+)
+from app.database import async_session
+from app.models import User
 from app.pipelines import get_modes
 
 router = APIRouter(prefix="/api")
+
+
+# ---------------------------------------------------------------- 认证
+
+
+class RegisterIn(BaseModel):
+    email: str
+    password: str
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/register")
+async def register_api(body: RegisterIn):
+    email = body.email.strip()
+    if not is_valid_email(email):
+        raise HTTPException(400, "邮箱格式不正确")
+    if not body.password:
+        raise HTTPException(400, "密码不能为空")
+
+    async with async_session() as db:
+        exists = (
+            await db.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if exists:
+            raise HTTPException(409, "该邮箱已注册")
+        pw_hash, salt = hash_password(body.password)
+        user = User(email=email, password_hash=pw_hash, salt=salt)
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        token = issue_token(user.id, db)
+        await db.commit()
+    return {"token": token, "user": {"id": user.id, "email": user.email}}
+
+
+@router.post("/auth/login")
+async def login_api(body: LoginIn):
+    email = body.email.strip()
+    if not is_valid_email(email):
+        raise HTTPException(400, "邮箱格式不正确")
+    if not body.password:
+        raise HTTPException(400, "密码不能为空")
+
+    async with async_session() as db:
+        user = (
+            await db.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if not user or not verify_password(body.password, user.salt, user.password_hash):
+            raise HTTPException(401, "邮箱或密码不正确")
+        token = issue_token(user.id, db)
+        await db.commit()
+    return {"token": token, "user": {"id": user.id, "email": user.email}}
+
+
+@router.get("/auth/me")
+async def me_api(user: User = Depends(get_current_user)):
+    return {"id": user.id, "email": user.email}
+
+
+@router.post("/auth/logout")
+async def logout_api(user: User = Depends(get_current_user)):
+    async with async_session() as db:
+        # 吊销当前 token：从依赖拿不到原 token，按当前用户吊销其最新 token
+        # 更稳妥的做法是让前端直接丢弃本地 token；这里额外清理该用户全部 token
+        from sqlalchemy import delete
+        from app.models import AuthToken
+        await db.execute(delete(AuthToken).where(AuthToken.user_id == user.id))
+        await db.commit()
+    return {"ok": True}
+
+
+def _ensure_owned(meta: dict | None, user: User) -> dict:
+    """校验会话存在且归属当前用户，否则抛 404/403。"""
+    if not meta:
+        raise HTTPException(404, "会话不存在")
+    if not store.owns_session(meta, user.id):
+        # 用 404 而非 403，避免泄露会话是否存在
+        raise HTTPException(404, "会话不存在")
+    return meta
 
 
 # ---------------------------------------------------------------- 模式 / agent
@@ -60,27 +156,25 @@ class SessionIn(BaseModel):
 
 
 @router.post("/sessions")
-def create_session_api(body: SessionIn):
+def create_session_api(body: SessionIn, user: User = Depends(get_current_user)):
     valid = {m["id"] for m in get_modes()}
     if body.mode not in valid:
         raise HTTPException(400, f"未知模式: {body.mode}")
     if not body.idea.strip():
         raise HTTPException(400, "idea 不能为空")
-    meta = store.create_session(body.mode, body.idea.strip(), body.title.strip())
+    meta = store.create_session(body.mode, body.idea.strip(), body.title.strip(), user_id=user.id)
     store.append_message(meta["id"], "user", body.idea.strip())
     return {"session": meta}
 
 
 @router.get("/sessions")
-def list_sessions_api():
-    return {"sessions": store.list_sessions()}
+def list_sessions_api(user: User = Depends(get_current_user)):
+    return {"sessions": store.list_sessions(user_id=user.id)}
 
 
 @router.get("/sessions/{sid}")
-def get_session_api(sid: str):
-    meta = store.load_meta(sid)
-    if not meta:
-        raise HTTPException(404, "会话不存在")
+def get_session_api(sid: str, user: User = Depends(get_current_user)):
+    meta = _ensure_owned(store.load_meta(sid), user)
     nodes = store.load_pipeline(sid)
     return {
         "session": meta,
@@ -118,10 +212,8 @@ def _roster_view(mode: str, nodes: list) -> dict:
 # ---------------------------------------------------------------- 运行 / 迭代（SSE）
 
 @router.post("/sessions/{sid}/run")
-async def run_session_api(sid: str):
-    meta = store.load_meta(sid)
-    if not meta:
-        raise HTTPException(404, "会话不存在")
+async def run_session_api(sid: str, user: User = Depends(get_current_user)):
+    meta = _ensure_owned(store.load_meta(sid), user)
 
     async def event_stream():
         # 回答后的恢复：把 answer 合并进 idea，清 pipeline 重跑 triage
@@ -141,10 +233,8 @@ async def run_session_api(sid: str):
 
 
 @router.post("/sessions/{sid}/iterate")
-async def iterate_session_api(sid: str, body: dict):
-    meta = store.load_meta(sid)
-    if not meta:
-        raise HTTPException(404, "会话不存在")
+async def iterate_session_api(sid: str, body: dict, user: User = Depends(get_current_user)):
+    meta = _ensure_owned(store.load_meta(sid), user)
     instruction = (body.get("instruction") or "").strip()
     if not instruction:
         raise HTTPException(400, "instruction 不能为空")
@@ -176,10 +266,8 @@ class AnswerIn(BaseModel):
 
 
 @router.post("/sessions/{sid}/answer")
-def answer_session_api(sid: str, body: AnswerIn):
-    meta = store.load_meta(sid)
-    if not meta:
-        raise HTTPException(404, "会话不存在")
+def answer_session_api(sid: str, body: AnswerIn, user: User = Depends(get_current_user)):
+    _ensure_owned(store.load_meta(sid), user)
     pending = store.load_pending(sid)
     if not pending:
         raise HTTPException(400, "没有待回答的确认点")
@@ -193,14 +281,14 @@ def answer_session_api(sid: str, body: AnswerIn):
 # ---------------------------------------------------------------- 文件 / 预览 / 快照 / 导出
 
 @router.get("/sessions/{sid}/files")
-def list_files_api(sid: str):
-    if not store.load_meta(sid):
-        raise HTTPException(404, "会话不存在")
+def list_files_api(sid: str, user: User = Depends(get_current_user)):
+    _ensure_owned(store.load_meta(sid), user)
     return {"files": store.list_workspace_files(sid)}
 
 
 @router.get("/sessions/{sid}/files/{path:path}")
-def read_file_api(sid: str, path: str):
+def read_file_api(sid: str, path: str, user: User = Depends(get_current_user)):
+    _ensure_owned(store.load_meta(sid), user)
     content = store.read_workspace_file(sid, path)
     if content is None:
         raise HTTPException(404, "文件不存在")
@@ -208,10 +296,13 @@ def read_file_api(sid: str, path: str):
 
 
 @router.get("/preview/{sid}/{path:path}")
-def preview_api(sid: str, path: str):
-    """直接以静态文件方式返回工作区文件，浏览器可打开。"""
-    if not store.load_meta(sid):
-        raise HTTPException(404, "会话不存在")
+def preview_api(sid: str, path: str, user: User = Depends(get_current_user)):
+    """直接以静态文件方式返回工作区文件，浏览器可打开。
+
+    iframe/导出链接无法带 Authorization 头，因此本接口同时支持 ?token= 查询参数
+    （get_current_user 已支持）。
+    """
+    _ensure_owned(store.load_meta(sid), user)
     base = store.workspace_dir(sid).resolve()
     target = (base / path).resolve()
     if not str(target).startswith(str(base)) or not target.exists() or not target.is_file():
@@ -220,9 +311,8 @@ def preview_api(sid: str, path: str):
 
 
 @router.get("/sessions/{sid}/snapshots")
-def list_snapshots_api(sid: str):
-    if not store.load_meta(sid):
-        raise HTTPException(404, "会话不存在")
+def list_snapshots_api(sid: str, user: User = Depends(get_current_user)):
+    _ensure_owned(store.load_meta(sid), user)
     return {"snapshots": files.list_snapshots(sid)}
 
 
@@ -231,18 +321,16 @@ class RollbackIn(BaseModel):
 
 
 @router.post("/sessions/{sid}/rollback")
-def rollback_api(sid: str, body: RollbackIn):
-    if not store.load_meta(sid):
-        raise HTTPException(404, "会话不存在")
+def rollback_api(sid: str, body: RollbackIn, user: User = Depends(get_current_user)):
+    _ensure_owned(store.load_meta(sid), user)
     if not files.rollback(sid, body.rev):
         raise HTTPException(404, "快照不存在")
     return {"ok": True, "files": store.list_workspace_files(sid)}
 
 
 @router.get("/sessions/{sid}/export")
-def export_api(sid: str):
-    if not store.load_meta(sid):
-        raise HTTPException(404, "会话不存在")
+def export_api(sid: str, user: User = Depends(get_current_user)):
+    _ensure_owned(store.load_meta(sid), user)
     base = store.workspace_dir(sid)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

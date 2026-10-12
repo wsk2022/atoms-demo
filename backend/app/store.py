@@ -52,7 +52,7 @@ def _write_json(path: Path, data: Any) -> None:
 
 # ---------------------------------------------------------------- 元数据
 
-def create_session(mode: str, idea: str, title: str = "") -> dict:
+def create_session(mode: str, idea: str, title: str = "", user_id: int | None = None) -> dict:
     """创建会话目录及初始元数据，返回 meta。"""
     sid = new_session_id()
     sdir = session_dir(sid)
@@ -67,6 +67,7 @@ def create_session(mode: str, idea: str, title: str = "") -> dict:
         "stage": "created",       # created | running | waiting_input | done | error
         "cursor": 0,              # pipeline 游标
         "seq": 0,                 # 事件序号
+        "user_id": user_id,       # 归属用户（None 表示迁移期遗留的旧会话）
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -151,18 +152,29 @@ def list_workspace_files(session_id: str) -> list:
 
 # ---------------------------------------------------------------- 列表
 
-def list_sessions() -> list:
-    """列出所有会话的精简元数据（供历史列表）。"""
+def list_sessions(user_id: int | None = None) -> list:
+    """列出会话的精简元数据（供历史列表）。
+
+    传 user_id 时只返回该用户的会话；不传则返回全部（向后兼容）。
+    """
     if not config.SESSIONS_DIR.exists():
         return []
     out = []
     for sdir in config.SESSIONS_DIR.iterdir():
         meta = _read_json(sdir / "meta.json", None)
-        if meta:
-            item = {k: meta[k] for k in ("id", "title", "mode", "stage", "updated_at") if k in meta}
-            item["has_app"] = (sdir / "workspace" / "index.html").exists()
-            out.append(item)
+        if not meta:
+            continue
+        if user_id is not None and meta.get("user_id") != user_id:
+            continue
+        item = {k: meta[k] for k in ("id", "title", "mode", "stage", "updated_at") if k in meta}
+        item["has_app"] = (sdir / "workspace" / "index.html").exists()
+        out.append(item)
     return sorted(out, key=lambda m: m.get("updated_at", 0), reverse=True)
+
+
+def owns_session(meta: dict | None, user_id: int) -> bool:
+    """会话是否归属该用户。旧会话（user_id=None）视为不归属任何登录用户。"""
+    return bool(meta) and meta.get("user_id") == user_id
 
 
 # ---------------------------------------------------------------- 运行态

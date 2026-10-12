@@ -7,6 +7,83 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_BASE_PATH ||
   "http://localhost:8000";
 
+// ---------------------------------------------------------------- 登录态 token
+
+const TOKEN_KEY = "relay_token";
+
+export function getAuthToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function setAuthToken(token: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(TOKEN_KEY);
+}
+
+/** 统一请求：自动注入 Authorization 头。供所有需要鉴权的接口复用。 */
+export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const token = getAuthToken();
+  const headers = new Headers(init.headers || {});
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return fetch(input, { ...init, headers });
+}
+
+// ---------------------------------------------------------------- 认证接口
+
+export interface AuthUser {
+  id: number;
+  email: string;
+}
+
+export async function register(email: string, password: string): Promise<{ token: string; user: AuthUser }> {
+  const r = await apiFetch(`${API_BASE}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || "注册失败");
+  return j;
+}
+
+export async function login(email: string, password: string): Promise<{ token: string; user: AuthUser }> {
+  const r = await apiFetch(`${API_BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || "登录失败");
+  return j;
+}
+
+export async function fetchMe(): Promise<AuthUser | null> {
+  const token = getAuthToken();
+  if (!token) return null;
+  const r = await apiFetch(`${API_BASE}/api/auth/me`);
+  if (r.status === 401) return null;
+  if (!r.ok) throw new Error("读取用户失败");
+  return r.json();
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+  } catch {
+    /* 忽略网络错误，本地 token 仍要清掉 */
+  }
+  clearAuthToken();
+}
+
+
 export interface AgentDetail {
   id: string;
   name: string;
@@ -40,13 +117,13 @@ export interface LoomEvent {
 }
 
 export async function fetchModes(): Promise<Mode[]> {
-  const r = await fetch(`${API_BASE}/api/modes`);
+  const r = await apiFetch(`${API_BASE}/api/modes`);
   const j = await r.json();
   return j.modes;
 }
 
 export async function createSession(mode: string, idea: string): Promise<{ id: string }> {
-  const r = await fetch(`${API_BASE}/api/sessions`, {
+  const r = await apiFetch(`${API_BASE}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode, idea }),
@@ -63,7 +140,7 @@ export async function runSession(
   onEvent: (e: LoomEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const resp = await fetch(`${API_BASE}/api/sessions/${sessionId}/run`, {
+  const resp = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/run`, {
     method: "POST",
     signal,
   });
@@ -89,8 +166,14 @@ export async function runSession(
   }
 }
 
-export function previewUrl(sessionId: string): string {
-  return `${API_BASE}/api/preview/${sessionId}/index.html`;
+export function previewUrl(sessionId: string, path = "index.html", nonce?: number): string {
+  // iframe 无法带 Authorization 头，改用 ?token= 查询参数（后端 get_current_user 支持）
+  const token = getAuthToken();
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (nonce != null) params.set("t", String(nonce));
+  const qs = params.toString();
+  return `${API_BASE}/api/preview/${sessionId}/${path}${qs ? `?${qs}` : ""}`;
 }
 
 export async function submitAnswer(
@@ -101,7 +184,7 @@ export async function submitAnswer(
   const body = answer && (answer.answers || answer.choice)
     ? { answers: answer.answers || {}, choice: answer.choice ?? null }
     : { answers: answer || {}, choice: null };
-  const r = await fetch(`${API_BASE}/api/sessions/${sessionId}/answer`, {
+  const r = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/answer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -117,7 +200,7 @@ export async function iterateSession(
   onEvent: (e: LoomEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const resp = await fetch(`${API_BASE}/api/sessions/${sessionId}/iterate`, {
+  const resp = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/iterate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ instruction }),
@@ -146,7 +229,7 @@ export async function iterateSession(
 }
 
 export async function fetchSnapshots(sessionId: string): Promise<string[]> {
-  const r = await fetch(`${API_BASE}/api/sessions/${sessionId}/snapshots`);
+  const r = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/snapshots`);
   return (await r.json()).snapshots || [];
 }
 
@@ -160,18 +243,19 @@ export interface SessionSummary {
 }
 
 export async function listSessions(): Promise<SessionSummary[]> {
-  const r = await fetch(`${API_BASE}/api/sessions`);
+  const r = await apiFetch(`${API_BASE}/api/sessions`);
   return (await r.json()).sessions || [];
 }
 
 export async function loadSession(sessionId: string): Promise<any> {
-  const r = await fetch(`${API_BASE}/api/sessions/${sessionId}`);
+  const r = await apiFetch(`${API_BASE}/api/sessions/${sessionId}`);
   if (!r.ok) throw new Error("加载会话失败");
   return r.json();
 }
 
 export function exportUrl(sessionId: string): string {
-  return `${API_BASE}/api/sessions/${sessionId}/export`;
+  const token = getAuthToken();
+  return `${API_BASE}/api/sessions/${sessionId}/export${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 // ---------------- Skill 市场 ----------------
@@ -188,12 +272,12 @@ export interface Skill {
 }
 
 export async function listSkills(): Promise<Skill[]> {
-  const r = await fetch(`${API_BASE}/api/skills`);
+  const r = await apiFetch(`${API_BASE}/api/skills`);
   return (await r.json()).skills || [];
 }
 
 export async function uploadSkill(content: string): Promise<Skill> {
-  const r = await fetch(`${API_BASE}/api/skills`, {
+  const r = await apiFetch(`${API_BASE}/api/skills`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
@@ -204,7 +288,7 @@ export async function uploadSkill(content: string): Promise<Skill> {
 }
 
 export async function toggleSkill(id: string, enabled: boolean): Promise<void> {
-  const r = await fetch(`${API_BASE}/api/skills/${id}/toggle`, {
+  const r = await apiFetch(`${API_BASE}/api/skills/${id}/toggle`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
@@ -213,7 +297,7 @@ export async function toggleSkill(id: string, enabled: boolean): Promise<void> {
 }
 
 export async function deleteSkill(id: string): Promise<void> {
-  const r = await fetch(`${API_BASE}/api/skills/${id}`, { method: "DELETE" });
+  const r = await apiFetch(`${API_BASE}/api/skills/${id}`, { method: "DELETE" });
   if (!r.ok) throw new Error("删除失败");
 }
 
@@ -221,7 +305,7 @@ export async function rollbackSnapshot(
   sessionId: string,
   rev: string
 ): Promise<void> {
-  const r = await fetch(`${API_BASE}/api/sessions/${sessionId}/rollback`, {
+  const r = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/rollback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ rev }),
@@ -239,7 +323,7 @@ export interface ModelConfig {
 }
 
 export async function fetchModelConfig(): Promise<ModelConfig> {
-  const r = await fetch(`${API_BASE}/api/model`);
+  const r = await apiFetch(`${API_BASE}/api/model`);
   if (!r.ok) throw new Error("读取模型配置失败");
   return r.json();
 }
@@ -247,7 +331,7 @@ export async function fetchModelConfig(): Promise<ModelConfig> {
 export async function updateModelConfig(
   cfg: Pick<ModelConfig, "api_key" | "base_url" | "model">
 ): Promise<void> {
-  const r = await fetch(`${API_BASE}/api/model`, {
+  const r = await apiFetch(`${API_BASE}/api/model`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(cfg),

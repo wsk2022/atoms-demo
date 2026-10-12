@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { listSessions, SessionSummary, API_BASE } from "@/lib/api";
+import { listSessions, SessionSummary, previewUrl } from "@/lib/api";
 
 const MODE_LABEL: Record<string, string> = {
   dev: "开发模式",
@@ -45,7 +45,7 @@ export default function Gallery({ onOpen }: { onOpen: (id: string) => void }) {
               <div className="relative h-44 overflow-hidden border-b border-line bg-soft">
                 <iframe
                   title={s.id}
-                  src={`${API_BASE}/api/preview/${s.id}/index.html`}
+                  src={previewUrl(s.id)}
                   className="pointer-events-none absolute left-0 top-0 origin-top-left"
                   style={{
                     width: "200%",

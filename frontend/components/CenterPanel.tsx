@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { API_BASE, AgentStatus, AgentDetail } from "@/lib/api";
+import { previewUrl, AgentStatus, AgentDetail } from "@/lib/api";
 
 export interface FileItem {
   path: string;
@@ -82,7 +82,7 @@ export default function CenterPanel({
               <iframe
                 key={previewNonce}
                 title="preview"
-                src={`${API_BASE}/api/preview/${sessionId}/index.html?t=${previewNonce}`}
+                src={previewUrl(sessionId, "index.html", previewNonce)}
                 className="h-full w-full border-0"
               />
             ) : (

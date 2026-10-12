@@ -3,8 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   createSession,
+  fetchMe,
   fetchModes,
   fetchModelConfig,
+  logout,
   runSession,
   submitAnswer,
   iterateSession,
@@ -12,8 +14,10 @@ import {
   exportUrl,
   LoomEvent,
   Mode,
+  AuthUser,
 } from "@/lib/api";
 import AgentTimeline from "@/components/AgentTimeline";
+import AuthModal from "@/components/AuthModal";
 import CenterPanel, { FileItem } from "@/components/CenterPanel";
 import Chat, { ChatMessage } from "@/components/Chat";
 import ConfirmCard, { ConfirmData } from "@/components/ConfirmCard";
@@ -83,6 +87,32 @@ export default function Home() {
   const [snapKey, setSnapKey] = useState(0); // 快照列表刷新触发器
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelConfigured, setModelConfigured] = useState<boolean | null>(null);
+
+  // 登录态
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+
+  // 启动时用本地 token 恢复登录态
+  useEffect(() => {
+    fetchMe()
+      .then((u) => {
+        setUser(u);
+        setAuthChecked(true);
+        if (!u) setAuthOpen(true);
+      })
+      .catch(() => {
+        setAuthChecked(true);
+        setAuthOpen(true);
+      });
+  }, []);
+
+  async function handleLogout() {
+    await logout();
+    setUser(null);
+    setStarted(false);
+    setAuthOpen(true);
+  }
 
   // 启动时检查模型是否已配置
   useEffect(() => {
@@ -458,6 +488,33 @@ export default function Home() {
     }
   }
 
+  // -------- 登录门禁 --------
+  if (!authChecked) {
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-sub">
+        加载中…
+      </div>
+    );
+  }
+  if (!user) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-6">
+        <div className="flex items-center gap-2 text-ink">
+          <Logo size={28} />
+          <span className="text-xl font-semibold tracking-tight">Relay</span>
+        </div>
+        <p className="text-sm text-sub">你的 AI 团队，把一句话变成可运行的应用</p>
+        <AuthModal
+          open={authOpen}
+          onSuccess={(u) => {
+            setUser(u);
+            setAuthOpen(false);
+          }}
+        />
+      </div>
+    );
+  }
+
   // -------- 首页 / 资源页 --------
   if (!started) {
     return (
@@ -503,6 +560,16 @@ export default function Home() {
                   未配置模型
                 </button>
               )}
+              <span className="hidden text-xs text-sub sm:inline" title={user.email}>
+                {user.email}
+              </span>
+              <button
+                onClick={handleLogout}
+                className="rounded-md border border-line px-2.5 py-1 text-xs text-sub transition hover:text-ink"
+                title="退出登录"
+              >
+                退出
+              </button>
               <button
                 onClick={() => setSettingsOpen(true)}
                 className="rounded-md border border-line p-1.5 text-sub transition hover:text-ink"
@@ -571,6 +638,16 @@ export default function Home() {
               未配置
             </button>
           )}
+          <span className="hidden text-xs text-sub sm:inline" title={user.email}>
+            {user.email}
+          </span>
+          <button
+            onClick={handleLogout}
+            className="rounded-md border border-line px-2.5 py-1 text-xs text-sub transition hover:text-ink"
+            title="退出登录"
+          >
+            退出
+          </button>
           <button
             onClick={() => setSettingsOpen(true)}
             className="rounded-md border border-line p-1.5 text-sub transition hover:text-ink"
