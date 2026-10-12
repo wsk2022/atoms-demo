@@ -125,7 +125,7 @@ async def logout_api(user: User = Depends(get_current_user)):
     return {"ok": True}
 
 
-def _ensure_owned(meta: dict | None, user: User) -> dict:
+def _ensure_owned(meta: Optional[dict], user: User) -> dict:
     """校验会话存在且归属当前用户，否则抛 404/403。"""
     if not meta:
         raise HTTPException(404, "会话不存在")

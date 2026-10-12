@@ -7,7 +7,7 @@
 """
 import asyncio
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import httpx
 
@@ -54,7 +54,7 @@ async def stream(
     headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
     url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
 
-    last_err: Exception | None = None
+    last_err: Optional[Exception] = None
     for attempt in range(settings.LLM_MAX_RETRIES):
         try:
             async with httpx.AsyncClient(

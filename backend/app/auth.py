@@ -11,6 +11,7 @@ import hashlib
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -41,7 +42,7 @@ def is_valid_email(email: str) -> bool:
 
 # ---------------------------------------------------------------- 密码哈希
 
-def hash_password(password: str) -> tuple[str, str]:
+def hash_password(password: str) -> "tuple[str, str]":
     """返回 (hash_hex, salt_hex)。"""
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), _PBKDF2_ITERS)
@@ -62,7 +63,7 @@ def issue_token(user_id: int, db: AsyncSession) -> str:
     return token
 
 
-async def resolve_token(token: str, db: AsyncSession) -> User | None:
+async def resolve_token(token: str, db: AsyncSession) -> Optional[User]:
     row = (await db.execute(select(AuthToken).where(AuthToken.token == token))).scalar_one_or_none()
     if not row:
         return None
@@ -82,8 +83,8 @@ async def revoke_token(token: str, db: AsyncSession) -> None:
 # ---------------------------------------------------------------- FastAPI 依赖
 
 async def get_current_user(
-    creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    token_query: str | None = Query(default=None, alias="token"),
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    token_query: Optional[str] = Query(default=None, alias="token"),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """从 Bearer 头或 ?token= 取 token，校验后返回当前用户。

@@ -52,7 +52,7 @@ def _write_json(path: Path, data: Any) -> None:
 
 # ---------------------------------------------------------------- 元数据
 
-def create_session(mode: str, idea: str, title: str = "", user_id: int | None = None) -> dict:
+def create_session(mode: str, idea: str, title: str = "", user_id: Optional[int] = None) -> dict:
     """创建会话目录及初始元数据，返回 meta。"""
     sid = new_session_id()
     sdir = session_dir(sid)
@@ -152,7 +152,7 @@ def list_workspace_files(session_id: str) -> list:
 
 # ---------------------------------------------------------------- 列表
 
-def list_sessions(user_id: int | None = None) -> list:
+def list_sessions(user_id: Optional[int] = None) -> list:
     """列出会话的精简元数据（供历史列表）。
 
     传 user_id 时只返回该用户的会话；不传则返回全部（向后兼容）。
@@ -172,7 +172,7 @@ def list_sessions(user_id: int | None = None) -> list:
     return sorted(out, key=lambda m: m.get("updated_at", 0), reverse=True)
 
 
-def owns_session(meta: dict | None, user_id: int) -> bool:
+def owns_session(meta: Optional[dict], user_id: int) -> bool:
     """会话是否归属该用户。旧会话（user_id=None）视为不归属任何登录用户。"""
     return bool(meta) and meta.get("user_id") == user_id
 
