@@ -84,6 +84,20 @@ async def revoke_token(token: str, db: AsyncSession) -> None:
 
 # ---------------------------------------------------------------- FastAPI 依赖
 
+def extract_token(
+    creds: Optional[HTTPAuthorizationCredentials], token_query: Optional[str]
+) -> Optional[str]:
+    """从 Bearer 头或 ?token= 查询参数中提取原始 token（不校验）。
+
+    供需要在响应侧复用 token 的接口使用（如预览 HTML 注入子资源链接）。
+    """
+    if creds and creds.credentials:
+        return creds.credentials.strip()
+    if token_query:
+        return token_query.strip()
+    return None
+
+
 async def get_current_user(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     token_query: Optional[str] = Query(default=None, alias="token"),
@@ -93,12 +107,7 @@ async def get_current_user(
 
     用法：路由形参 user: User = Depends(get_current_user)。
     """
-    raw = None
-    if creds and creds.credentials:
-        raw = creds.credentials.strip()
-    elif token_query:
-        raw = token_query.strip()
-
+    raw = extract_token(creds, token_query)
     if not raw:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
     user = await resolve_token(raw, db)

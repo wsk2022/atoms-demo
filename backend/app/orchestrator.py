@@ -9,6 +9,7 @@
 """
 import asyncio
 import logging
+import re
 from typing import AsyncGenerator
 
 from app import files, llm, prompts, skills, store
@@ -544,14 +545,36 @@ def _finish_iteration(meta, agent, note):
     store.save_meta(meta)
 
 
+def _existing_storage_keys(sid: str) -> list:
+    """扫描当前工作区代码里已使用的 localStorage 键名（保护用户数据用）。"""
+    keys: list = []
+    for p in store.list_workspace_files(sid):
+        if not p.endswith((".html", ".htm", ".js")):
+            continue
+        content = store.read_workspace_file(sid, p) or ""
+        for m in re.finditer(r"localStorage\.(?:getItem|setItem)\(\s*[\"']([^\"']+)[\"']", content):
+            if m.group(1) not in keys:
+                keys.append(m.group(1))
+    return keys
+
+
 async def _full_rewrite(meta: dict, instruction: str) -> AsyncGenerator[str, None]:
     sid = meta["id"]
     agent = AGENTS["maker"]
     yield _emit(meta, "agent_start", agent=agent.id, node="rewrite", role="全量重写")
 
     prev = store.read_workspace_file(sid, "index.html") or ""
+    keep = ""
+    keys = _existing_storage_keys(sid)
+    if keys:
+        keep = (
+            "\n\n【重要】当前应用已使用以下 localStorage 键保存用户数据："
+            + "、".join(keys)
+            + "。重写后必须继续使用完全相同的键名读写已有数据，"
+              "确保用户既有记录（如历史、待办）在重写后仍然可见，不许更换键名或清空数据。"
+        )
     context = (f"\n这是当前的 index.html，请在此基础上按指令修改：\n{prev[:6000]}"
-               f"\n\n修改指令：{instruction}")
+               f"\n\n修改指令：{instruction}{keep}")
     system = prompts.MAKER_MULTIFILE_SYSTEM
     user = prompts.MAKER_MULTIFILE_USER.format(idea=meta["idea"], context=context)
     system = _with_skills(system, "maker", meta["idea"])

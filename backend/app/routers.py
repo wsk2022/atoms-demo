@@ -26,12 +26,14 @@ RESTful 设计：
 """
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, FileResponse, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -39,6 +41,7 @@ from app import config, files, orchestrator, skills, store
 from app.agents import list_agents
 from app.auth import (
     bearer_scheme,
+    extract_token,
     get_current_user,
     hash_password,
     is_valid_email,
@@ -178,10 +181,15 @@ def list_sessions_api(user: User = Depends(get_current_user)):
 def get_session_api(sid: str, user: User = Depends(get_current_user)):
     meta = _ensure_owned(store.load_meta(sid), user)
     nodes = store.load_pipeline(sid)
+    # files 携带内容：前端重开项目时源码视图可直接恢复（无需逐个再请求）
+    files_payload = [
+        {"path": p, "content": store.read_workspace_file(sid, p) or ""}
+        for p in store.list_workspace_files(sid)
+    ]
     return {
         "session": meta,
         "messages": store.load_messages(sid),
-        "files": store.list_workspace_files(sid),
+        "files": files_payload,
         "pipeline": store.load_pipeline(sid),
         "pending": store.load_pending(sid),
         "brief": store.load_artifact(sid, "brief"),
@@ -193,21 +201,28 @@ def get_session_api(sid: str, user: User = Depends(get_current_user)):
 
 
 def _roster_view(mode: str, nodes: list) -> dict:
-    """前端右侧 agent 列表：每个 agent 的状态/活跃说明。"""
-    statuses: dict[str, str] = {}
+    """前端右侧 agent 列表：每个 agent 的状态/活跃说明。
+
+    先按模式铺满全部成员（pending），再用 pipeline 节点的实际状态覆盖——
+    这样重开会话时也能看到每个 agent 的最终状态，而不是只看到有节点的。
+    """
+    from app.pipelines import MODES
+
+    members: list = []
+    for m in MODES:
+        if m["id"] == mode:
+            members = m["members"]
+            break
+
+    statuses = {a: "pending" for a in members}
     active_note: dict[str, str] = {}
     for n in nodes:
         aid = n.get("agent", "")
         st = n.get("status", "pending")
-        statuses[aid] = st
+        if aid:
+            statuses[aid] = st
         if st == "running" and n.get("output"):
             active_note[aid] = f"正在产出 {n['output']}"
-    if not statuses:
-        from app.pipelines import MODES
-        for m in MODES:
-            if m["id"] == mode:
-                statuses = {a: "pending" for a in m["agents"]}
-                break
     return {"statuses": statuses, "active_note": active_note}
 
 
@@ -297,18 +312,58 @@ def read_file_api(sid: str, path: str, user: User = Depends(get_current_user)):
     return {"path": path, "content": content}
 
 
+_PREVIEW_ATTR_RE = re.compile(r'\b(src|href)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
+
+
+def _inject_preview_token(html: str, token: str) -> str:
+    """把 ?token= 注入 HTML 中的相对资源链接。
+
+    iframe 只在首屏 URL 上带了 token，HTML 里的 CSS/JS/图片等相对路径
+    请求不会自动携带，会 401。这里在返回 HTML 前统一补上 token。
+    """
+    if not token:
+        return html
+
+    def _repl(m: "re.Match[str]") -> str:
+        attr, quoted, single = m.group(1), m.group(2), m.group(3)
+        url = quoted if quoted is not None else single
+        quote = '"' if quoted is not None else "'"
+        low = url.strip().lower()
+        if (
+            not url
+            or low.startswith(("http://", "https://", "//", "data:", "#", "mailto:", "javascript:"))
+            or "token=" in low
+        ):
+            return m.group(0)
+        sep = "&" if "?" in url else "?"
+        return f"{attr}={quote}{url}{sep}token={token}{quote}"
+
+    return _PREVIEW_ATTR_RE.sub(_repl, html)
+
+
 @router.get("/preview/{sid}/{path:path}")
-def preview_api(sid: str, path: str, user: User = Depends(get_current_user)):
+def preview_api(
+    sid: str,
+    path: str,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    token_query: Optional[str] = Query(default=None, alias="token"),
+    user: User = Depends(get_current_user),
+):
     """直接以静态文件方式返回工作区文件，浏览器可打开。
 
     iframe/导出链接无法带 Authorization 头，因此本接口同时支持 ?token= 查询参数
-    （get_current_user 已支持）。
+    （get_current_user 已支持）。返回 HTML 时会把 token 注入其中的相对资源链接，
+    避免子资源（CSS/JS/图片）因缺 token 而 401。
     """
     _ensure_owned(store.load_meta(sid), user)
     base = store.workspace_dir(sid).resolve()
     target = (base / path).resolve()
     if not str(target).startswith(str(base)) or not target.exists() or not target.is_file():
         raise HTTPException(404, "文件不存在")
+    if target.suffix.lower() in (".html", ".htm"):
+        token = extract_token(creds, token_query) or ""
+        html = target.read_text(encoding="utf-8", errors="replace")
+        return Response(_inject_preview_token(html, token), media_type="text/html; charset=utf-8")
     return FileResponse(str(target))
 
 

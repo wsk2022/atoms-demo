@@ -449,7 +449,8 @@ export default function Home() {
         )
       );
       // 恢复该模式的完整角色名单 + 各 agent 最终状态
-      const openedMode = data.meta?.mode || "sketch";
+      // 注意：后端返回的键是 session（不是 meta）
+      const openedMode = data.session?.mode || "sketch";
       setRosterMode(openedMode);
       const status = seedRoster(openedMode);
       (data.pipeline || []).forEach((n: any) => {
@@ -458,12 +459,12 @@ export default function Home() {
       setAgentStatus(status);
       setAgentNote({});
       setAgentLog({});
-      setOverview({ mode: data.meta?.mode });
-      setStage(data.meta?.stage);
+      setOverview({ mode: data.session?.mode });
+      setStage(data.session?.stage);
       const hasFiles = (data.files || []).length > 0;
       setPreviewReady(hasFiles);
       setPreviewNonce((n) => n + 1);
-      setCompleted(data.meta?.stage === "done" && hasFiles);
+      setCompleted(data.session?.stage === "done" && hasFiles);
       setConfirm(null);
     } catch (err: any) {
       setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${err.message}` }]);
